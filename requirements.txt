@@ -1,0 +1,5 @@
+akshare>=1.12.0
+pandas>=2.0.0
+sqlalchemy>=2.0.0
+tqdm>=4.65.0
+loguru>=0.7.0
