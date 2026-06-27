@@ -10,7 +10,7 @@
 
 import time
 import json
-from datetime import datetime
+from datetime import datetime, date as date_type
 from typing import Optional
 
 import requests
@@ -42,7 +42,7 @@ def _parse_days(days: list) -> list:
     for d in days:
         try:
             rows.append({
-                "date":        d[0],
+                "date":        datetime.strptime(d[0], "%Y-%m-%d").date(),  # 必须是 date 对象
                 "open":        float(d[1]),
                 "close":       float(d[2]),
                 "high":        float(d[3]),
