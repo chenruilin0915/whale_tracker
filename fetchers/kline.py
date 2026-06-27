@@ -83,13 +83,14 @@ def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
     # 优先前复权(qfq)，部分新股/北交所不支持则 fallback 到不复权
+    # 注意：必须手动拼URL，不能用params={}——requests会把逗号编码为%2C导致API解析失败
     for adj in ["qfq", ""]:
         var_name = f"kline_dayqfq_{code}" if adj else f"kline_day_{code}"
-        params = {
-            "_var": var_name,
-            "param": f"{symbol},day,{start_str},{end_str},5000,{adj}"
-        }
-        resp = requests.get(url, params=params, timeout=15)
+        full_url = (
+            f"{url}?_var={var_name}"
+            f"&param={symbol},day,{start_str},{end_str},5000,{adj}"
+        )
+        resp = requests.get(full_url, timeout=15)
         text = resp.text
         json_str = text[text.index("=") + 1:]
         data = json.loads(json_str)
