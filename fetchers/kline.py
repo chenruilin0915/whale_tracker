@@ -36,43 +36,13 @@ def _build_symbol(code: str) -> str:
         return f"sz{code}"
 
 
-def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
-    """
-    从腾讯证券拉取前复权日K线。
-    返回 list of dict，字段：date/open/close/high/low/volume/change_rate
-    """
-    symbol = _build_symbol(code)
-    # 腾讯接口：start/end 格式 YYYY-MM-DD，count 给足够大的数
-    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-    params = {
-        "_var": f"kline_dayqfq_{code}",
-        "param": f"{symbol},day,{start[:4]}-{start[4:6]}-{start[6:]},{end[:4]}-{end[4:6]}-{end[6:]},5000,qfq"
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    text = resp.text
-
-    # 响应格式：kline_dayqfq_XXXXXX={...}
-    json_str = text[text.index("=") + 1:]
-    data = json.loads(json_str)
-
-    # 取 qfqday 或 day（兼容多种返回格式）
-    raw_data = data.get("data", {})
-    if not isinstance(raw_data, dict):
-        return []   # data 本身是空列表，说明该股票无数据（退市等）
-    stock_data = raw_data.get(symbol, {})
-    if isinstance(stock_data, list):
-        days = stock_data           # 部分股票直接返回列表
-    elif isinstance(stock_data, dict):
-        days = stock_data.get("qfqday") or stock_data.get("day") or []
-    else:
-        return []
-
+def _parse_days(days: list) -> list:
+    """解析腾讯K线数组，返回标准格式行"""
     rows = []
     for d in days:
-        # 格式：[date, open, close, high, low, volume, ?, ?, change_rate?, ...]
         try:
             rows.append({
-                "date":        d[0],           # YYYY-MM-DD
+                "date":        d[0],
                 "open":        float(d[1]),
                 "close":       float(d[2]),
                 "high":        float(d[3]),
@@ -87,6 +57,48 @@ def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
         except (IndexError, ValueError):
             continue
     return rows
+
+
+def _extract_days(data: dict, symbol: str) -> list:
+    """从腾讯API响应中提取K线数组，兼容各种嵌套格式"""
+    raw_data = data.get("data", {})
+    if not isinstance(raw_data, dict):
+        return []
+    stock_data = raw_data.get(symbol, {})
+    if isinstance(stock_data, list):
+        return stock_data
+    elif isinstance(stock_data, dict):
+        return stock_data.get("qfqday") or stock_data.get("day") or []
+    return []
+
+
+def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
+    """
+    从腾讯证券拉取日K线（优先前复权，无数据则 fallback 不复权）。
+    返回 list of dict，字段：date/open/close/high/low/volume/change_rate
+    """
+    symbol = _build_symbol(code)
+    start_str = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    end_str   = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+
+    # 优先前复权(qfq)，部分新股/北交所不支持则 fallback 到不复权
+    for adj in ["qfq", ""]:
+        var_name = f"kline_dayqfq_{code}" if adj else f"kline_day_{code}"
+        params = {
+            "_var": var_name,
+            "param": f"{symbol},day,{start_str},{end_str},5000,{adj}"
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        text = resp.text
+        json_str = text[text.index("=") + 1:]
+        data = json.loads(json_str)
+
+        days = _extract_days(data, symbol)
+        if days:
+            return _parse_days(days)
+
+    return []  # 两种方式均无数据（真正退市/无法访问）
 
 
 # ─────────────────────────────────────────────────────────────
