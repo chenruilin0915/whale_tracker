@@ -85,15 +85,15 @@ def add_pending(signals, signal_date: date) -> int:
     返回新增数量。
     """
     with get_session() as s:
-        # 当前已有持仓的代码
+        # 当前已有持仓的代码（包含 pending_exit，避免重复买同一只）
         existing = {
             p.code for p in s.query(PaperPosition)
-            .filter(PaperPosition.status.in_(["pending", "open"]))
+            .filter(PaperPosition.status.in_(["pending", "open", "pending_exit"]))
             .all()
         }
-        # 剩余仓位
+        # 剩余仓位（pending_exit 明日会释放，但今晚先保守计算）
         open_count = len([p for p in s.query(PaperPosition)
-                          .filter(PaperPosition.status.in_(["pending", "open"])).all()])
+                          .filter(PaperPosition.status.in_(["pending", "open", "pending_exit"])).all()])
         slots = PAPER_MAX_POS - open_count
 
         added = 0
@@ -175,8 +175,9 @@ def open_positions(trade_date: date) -> list[dict]:
 
 def check_exits(trade_date: date) -> tuple[list[dict], list[dict]]:
     """
-    收盘：检查所有 open 持仓的止损/止盈/到期。
-    返回 (closed_list, still_open_list)
+    收盘：检查所有 open 持仓，触发条件的标记为 pending_exit（明日开盘卖出）。
+    不在此处平仓——收盘后无法交易，实际平仓在次日 morning_open 执行。
+    返回 (pending_exit_list, still_open_list)
     """
     with get_session() as s:
         positions = s.query(PaperPosition).filter_by(status="open").all()
@@ -186,8 +187,8 @@ def check_exits(trade_date: date) -> tuple[list[dict], list[dict]]:
         codes = [p.code for p in positions]
         quotes = fetch_realtime(codes)
 
-        closed = []
-        still_open = []
+        pending_exit = []
+        still_open   = []
 
         for pos in positions:
             q = quotes.get(pos.code)
@@ -198,13 +199,14 @@ def check_exits(trade_date: date) -> tuple[list[dict], list[dict]]:
                 still_open.append({
                     "code": pos.code, "name": pos.name or pos.code,
                     "hold_days": (trade_date - pos.entry_date).days if pos.entry_date else "?",
+                    "float_pct": None,
                 })
                 continue
 
             hold_days = (trade_date - pos.entry_date).days if pos.entry_date else 0
             ret = (current_price - pos.entry_price) / pos.entry_price
 
-            # 判断退出条件（优先级：止损 > 止盈 > 到期）
+            # 判断退出条件（收盘价达到阈值 → 次日开盘执行）
             exit_reason = None
             if ret <= PAPER_STOP_LOSS:
                 exit_reason = "stop_loss"
@@ -213,30 +215,28 @@ def check_exits(trade_date: date) -> tuple[list[dict], list[dict]]:
             elif hold_days >= PAPER_MAX_HOLD:
                 exit_reason = "max_hold"
 
-            if exit_reason:
-                pnl     = round((current_price - pos.entry_price) * pos.shares, 2)
-                pnl_pct = round(ret * 100, 2)
-                pos.exit_date   = trade_date
-                pos.exit_price  = current_price
-                pos.exit_reason = exit_reason
-                pos.pnl         = pnl
-                pos.pnl_pct     = pnl_pct
-                pos.status      = "closed"
+            float_pct = round(ret * 100, 2)
 
-                closed.append({
+            if exit_reason:
+                # 标记为待平仓，记录触发时的收盘价作为参考
+                pos.status      = "pending_exit"
+                pos.exit_reason = exit_reason
+                pos.exit_price  = current_price  # 收盘参考价，明日按开盘价实际平仓
+
+                pending_exit.append({
                     "code": pos.code, "name": pos.name or pos.code,
-                    "entry": pos.entry_price, "exit_price": current_price,
-                    "pnl": pnl, "pnl_pct": pnl_pct,
-                    "exit_reason": exit_reason, "hold_days": hold_days,
+                    "entry": pos.entry_price,
+                    "close_price": current_price,   # 今日收盘参考
+                    "float_pct": float_pct,
+                    "exit_reason": exit_reason,
+                    "hold_days": hold_days,
                 })
                 label = {"stop_loss":"🛑止损","take_profit":"🎯止盈","max_hold":"⏰到期"}[exit_reason]
-                logger.success(
-                    f"  {label} {pos.code} {pos.name}  "
-                    f"{pos.entry_price:.2f}→{current_price:.2f}  "
-                    f"{pnl_pct:+.1f}% ({pnl:+,.0f}元)"
+                logger.info(
+                    f"  {label}预警 {pos.code} {pos.name}  "
+                    f"收盘 {current_price:.2f}  浮{float_pct:+.1f}%  → 明日开盘卖出"
                 )
             else:
-                float_pct = round(ret * 100, 2)
                 still_open.append({
                     "code": pos.code, "name": pos.name or pos.code,
                     "hold_days": hold_days,
@@ -249,7 +249,55 @@ def check_exits(trade_date: date) -> tuple[list[dict], list[dict]]:
                     f"持{hold_days}天  浮盈: {float_pct:+.1f}%"
                 )
 
-    return closed, still_open
+    return pending_exit, still_open
+
+
+def execute_exits(trade_date: date) -> list[dict]:
+    """
+    早盘：将 pending_exit 持仓以今日开盘价实际平仓 → status=closed。
+    返回已平仓列表（用于推送）。
+    """
+    with get_session() as s:
+        positions = s.query(PaperPosition).filter_by(status="pending_exit").all()
+        if not positions:
+            return []
+
+        codes = [p.code for p in positions]
+        quotes = fetch_realtime(codes)
+
+        closed = []
+        for pos in positions:
+            q = quotes.get(pos.code)
+            if not q or q["open"] <= 0:
+                logger.warning(f"  {pos.code} 获取开盘价失败，延迟平仓")
+                continue
+
+            exit_price = q["open"]  # 以今日开盘价平仓
+            pnl     = round((exit_price - pos.entry_price) * pos.shares, 2)
+            pnl_pct = round((exit_price - pos.entry_price) / pos.entry_price * 100, 2)
+
+            pos.exit_date  = trade_date
+            pos.exit_price = exit_price
+            pos.pnl        = pnl
+            pos.pnl_pct    = pnl_pct
+            pos.status     = "closed"
+
+            closed.append({
+                "code": pos.code, "name": pos.name or pos.code,
+                "entry": pos.entry_price,
+                "exit_price": exit_price,
+                "pnl": pnl, "pnl_pct": pnl_pct,
+                "exit_reason": pos.exit_reason,
+            })
+            label = {"stop_loss":"🛑止损","take_profit":"🎯止盈","max_hold":"⏰到期"}.get(
+                pos.exit_reason, "平仓")
+            logger.success(
+                f"  {label} {pos.code} {pos.name}  "
+                f"买入:{pos.entry_price:.2f} → 开盘卖出:{exit_price:.2f}  "
+                f"{pnl_pct:+.1f}% ({pnl:+,.0f}元)"
+            )
+
+    return closed
 
 
 def get_total_pnl() -> dict:
