@@ -173,22 +173,32 @@ def fetch_klines_for_lhb_stocks(
 ) -> int:
     with get_session() as s:
         result = s.query(LhbDaily.code).distinct().all()
-    codes = [r[0] for r in result]
+    all_codes = [r[0] for r in result]
 
     if limit:
-        codes = codes[:limit]
+        all_codes = all_codes[:limit]
 
-    logger.info(f"K线采集：共 {len(codes)} 只股票（腾讯证券数据源）")
+    # 预过滤：只处理未完成的股票（跳过 status=done 的，保留 status=error 的）
+    pending = [c for c in all_codes if not _is_done(f"kline:{c}")]
+    done_before = len(all_codes) - len(pending)
+    logger.info(f"K线采集：共 {len(all_codes)} 只股票，已完成 {done_before}，待采集 {len(pending)}（腾讯证券数据源）")
+
+    if not pending:
+        logger.info("全部已完成，跳过")
+        return 0
+
     total_new = 0
-
-    for i, code in enumerate(codes, 1):
+    for i, code in enumerate(pending, 1):
         new = fetch_kline_single(code, start_date, end_date)
         total_new += new
         if new > 0:
-            logger.success(f"  [{i}/{len(codes)}] {code} → +{new} 行")
+            logger.success(f"  [{i}/{len(pending)}] {code} → +{new} 行")
         else:
-            logger.debug(f"  [{i}/{len(codes)}] {code} → 跳过")
+            logger.debug(f"  [{i}/{len(pending)}] {code} → 0行（退市/无数据）")
         time.sleep(KLINE_SLEEP)
+        if i % 200 == 0:
+            pct = round((done_before + i) / len(all_codes) * 100, 1)
+            logger.info(f"  进度 {pct}%，本次新增 {total_new} 条")
 
     logger.info(f"K线采集完成，累计新增 {total_new} 条")
     return total_new
