@@ -148,6 +148,42 @@ class FetchLog(Base):
     fetched_at = Column(String(30), comment="完成时间 ISO8601")
 
 
+# ─────────────────────────────────────────────────────────────
+# 5. 模拟持仓记录
+# ─────────────────────────────────────────────────────────────
+class PaperPosition(Base):
+    """
+    模拟盘持仓记录
+    status: pending（信号已生成，等待T+1开盘买入）
+            open   （已买入，持仓中）
+            closed （已平仓）
+    """
+    __tablename__ = "paper_positions"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    code         = Column(String(10), nullable=False)
+    name         = Column(String(20))
+    signal_date  = Column(Date, comment="信号日（龙虎榜日期）")
+    entry_date   = Column(Date, comment="买入日期（T+1）")
+    entry_price  = Column(Float, comment="买入价（开盘价）")
+    shares       = Column(Integer, comment="股数（100股整倍）")
+    cost         = Column(Float, comment="买入总金额（元）")
+    status       = Column(String(10), default="pending")
+    signal_seat  = Column(String(100), comment="触发席位")
+    signal_score = Column(Float)
+    exit_date    = Column(Date)
+    exit_price   = Column(Float)
+    exit_reason  = Column(String(20), comment="take_profit/stop_loss/max_hold/manual")
+    pnl          = Column(Float, comment="盈亏（元）")
+    pnl_pct      = Column(Float, comment="盈亏%")
+    created_at   = Column(String(30))
+
+    __table_args__ = (
+        Index("ix_paper_status", "status"),
+        Index("ix_paper_code", "code"),
+    )
+
+
 def init_db(db_url: str) -> None:
     """创建所有表（幂等）"""
     engine = create_engine(db_url, echo=False)

@@ -37,3 +37,13 @@ KLINE_SLEEP      = 0.5   # 秒
 SEAT_MIN_RECORDS   = 30    # 近5年至少出现30次才纳入评分
 SEAT_MIN_WIN_RATE  = 0.55  # T+3 胜率下限
 SEAT_MIN_AVG_RET   = 0.015 # T+3 平均收益下限（1.5%）
+
+# ── 模拟盘参数（Week 4） ──────────────────────────────
+PAPER_CAPITAL      = 100_000  # 总资金（元）
+PAPER_MAX_POS      = 5        # 最多同时持仓数
+PAPER_STOP_LOSS    = -0.03    # 止损线 -3%
+PAPER_TAKE_PROFIT  = 0.07     # 止盈线 +7%
+PAPER_MAX_HOLD     = 3        # 最大持仓天数
+
+# ── Server Chan 推送（方糖） ──────────────────────────
+SCT_KEY = "SCT308342TFje2T0AxdJDaE1HjkxNYcrhf"

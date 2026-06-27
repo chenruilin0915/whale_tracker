@@ -202,7 +202,10 @@ def generate_signals(
         logger.info("今日无满足条件的信号")
         return pd.DataFrame()
 
-    result = pd.DataFrame(signals).sort_values("score", ascending=False)
+    result = pd.DataFrame(signals)
+    # 去重：同一股票保留评分最高的那条
+    result = result.sort_values("score", ascending=False).drop_duplicates(subset="code", keep="first")
+    result = result.reset_index(drop=True)
     logger.success(f"信号生成完成: 共 {len(result)} 个 T+1 候选股票")
     return result
 
