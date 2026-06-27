@@ -1,40 +1,80 @@
 """
-Server Chan（方糖）推送工具
+推送工具 — 双通道：ntfy.sh（主） + Server Chan（备）
 
-官网: https://sct.ftqq.com
-发送接口: POST https://sctapi.ftqq.com/{key}.send
+ntfy.sh: 免费、无需注册、香港服务器可访问
+  订阅方法: 下载 ntfy app → 订阅 topic "whale_tracker_chen"
+  或浏览器: https://ntfy.sh/whale_tracker_chen
+
+Server Chan: 国内方糖推送（HK服务器可能超时，作为备用）
 """
 
 import requests
 from loguru import logger
 from config import SCT_KEY
 
-SCT_URL = f"https://sctapi.ftqq.com/{SCT_KEY}.send"
+# ntfy.sh topic（唯一即可，手机 app 订阅同名 topic）
+NTFY_TOPIC = "whale_tracker_chen"
+NTFY_URL   = f"https://ntfy.sh/{NTFY_TOPIC}"
+
+# Server Chan 端点：优先用国际版（HK 可达），再试标准版
+SCT_URLS = [
+    f"https://sc.ftqq.com/{SCT_KEY}.send",       # 国际版
+    f"https://sctapi.ftqq.com/{SCT_KEY}.send",    # 标准版
+]
 
 
 def push(title: str, body: str = "") -> bool:
     """
     推送消息到手机。
-    title: 标题（最多64字符，必填）
-    body:  正文（Markdown格式，可选）
-    返回: True=成功, False=失败
+    优先 Server Chan 国际版，失败则 ntfy.sh 兜底。
+    返回: True=至少一个通道成功
     """
+    ok = _push_sct(title, body)
+    if not ok:
+        ok = _push_ntfy(title, body)
+    return ok
+
+
+def _push_ntfy(title: str, body: str = "") -> bool:
+    """ntfy.sh 推送（香港可达）"""
     try:
         resp = requests.post(
-            SCT_URL,
-            data={"title": title[:64], "desp": body},
+            NTFY_URL,
+            data=body.encode("utf-8") if body else title.encode("utf-8"),
+            headers={
+                "Title":    title[:255].encode("utf-8"),
+                "Priority": "default",
+                "Tags":     "whale",
+            },
             timeout=10,
         )
-        data = resp.json()
-        if data.get("data", {}).get("errno") == 0 or data.get("code") == 0:
-            logger.info(f"📱 推送成功: {title[:30]}")
+        if resp.status_code == 200:
+            logger.info(f"📱 ntfy 推送成功: {title[:30]}")
             return True
-        else:
-            logger.warning(f"推送失败: {data}")
-            return False
-    except Exception as e:
-        logger.warning(f"推送异常: {e}")
+        logger.warning(f"ntfy 推送失败: {resp.status_code}")
         return False
+    except Exception as e:
+        logger.warning(f"ntfy 异常: {e}")
+        return False
+
+
+def _push_sct(title: str, body: str = "") -> bool:
+    """Server Chan 推送（依次尝试国际版 → 标准版）"""
+    for url in SCT_URLS:
+        try:
+            resp = requests.post(
+                url,
+                data={"title": title[:64], "desp": body},
+                timeout=8,
+            )
+            data = resp.json()
+            if data.get("data", {}).get("errno") == 0 or data.get("code") == 0:
+                logger.info(f"📱 SCT 推送成功: {title[:30]}  ({url.split('/')[2]})")
+                return True
+            logger.debug(f"SCT 端点 {url.split('/')[2]} 返回: {data}")
+        except Exception as e:
+            logger.debug(f"SCT 端点 {url.split('/')[2]} 超时: {e}")
+    return False
 
 
 def push_signals(signals, trade_date: str):
