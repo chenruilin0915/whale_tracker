@@ -88,7 +88,7 @@ def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
         var_name = f"kline_dayqfq_{code}" if adj else f"kline_day_{code}"
         full_url = (
             f"{url}?_var={var_name}"
-            f"&param={symbol},day,{start_str},{end_str},5000,{adj}"
+            f"&param={symbol},day,{start_str},{end_str},1500,{adj}"
         )
         resp = requests.get(full_url, timeout=15)
         text = resp.text
