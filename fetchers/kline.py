@@ -1,16 +1,19 @@
 """
-日K线数据采集模块
+日K线数据采集模块（腾讯证券数据源，香港服务器可用）
 
 功能：
   fetch_klines_for_lhb_stocks() — 为龙虎榜中出现过的所有股票拉取日K线
   fetch_kline_single()          — 单只股票K线（供外部调用）
+
+数据源：web.ifzq.gtimg.cn（腾讯证券），替代东方财富 push2his（香港不可达）
 """
 
 import time
+import json
 from datetime import datetime
 from typing import Optional
 
-import akshare as ak
+import requests
 from loguru import logger
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -18,6 +21,69 @@ from config import HISTORY_START, HISTORY_END, KLINE_SLEEP
 from db.connection import get_session, get_engine
 from db.models import FetchLog, LhbDaily, StockDaily
 
+
+# ─────────────────────────────────────────────────────────────
+# 腾讯K线接口
+# ─────────────────────────────────────────────────────────────
+
+def _build_symbol(code: str) -> str:
+    """000001 → sz000001，600001 → sh600001"""
+    if code.startswith("6"):
+        return f"sh{code}"
+    elif code.startswith("8") or code.startswith("4"):
+        return f"bj{code}"
+    else:
+        return f"sz{code}"
+
+
+def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
+    """
+    从腾讯证券拉取前复权日K线。
+    返回 list of dict，字段：date/open/close/high/low/volume/change_rate
+    """
+    symbol = _build_symbol(code)
+    # 腾讯接口：start/end 格式 YYYY-MM-DD，count 给足够大的数
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {
+        "_var": f"kline_dayqfq_{code}",
+        "param": f"{symbol},day,{start[:4]}-{start[4:6]}-{start[6:]},{end[:4]}-{end[4:6]}-{end[6:]},5000,qfq"
+    }
+    resp = requests.get(url, params=params, timeout=15)
+    text = resp.text
+
+    # 响应格式：kline_dayqfq_XXXXXX={...}
+    json_str = text[text.index("=") + 1:]
+    data = json.loads(json_str)
+
+    # 取 qfqday 或 day
+    stock_data = data.get("data", {}).get(symbol, {})
+    days = stock_data.get("qfqday") or stock_data.get("day") or []
+
+    rows = []
+    for d in days:
+        # 格式：[date, open, close, high, low, volume, ?, ?, change_rate?, ...]
+        try:
+            rows.append({
+                "date":        d[0],           # YYYY-MM-DD
+                "open":        float(d[1]),
+                "close":       float(d[2]),
+                "high":        float(d[3]),
+                "low":         float(d[4]),
+                "volume":      float(d[5]),
+                "amount":      None,
+                "amplitude":   None,
+                "change_rate": float(d[8]) if len(d) > 8 else None,
+                "change_amt":  None,
+                "turnover":    None,
+            })
+        except (IndexError, ValueError):
+            continue
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────
+# 工具函数
+# ─────────────────────────────────────────────────────────────
 
 def _is_done(task_key: str) -> bool:
     with get_session() as s:
@@ -55,52 +121,30 @@ def _mark_error(task_key: str, msg: str) -> None:
             ))
 
 
+# ─────────────────────────────────────────────────────────────
+# 采集入口
+# ─────────────────────────────────────────────────────────────
+
 def fetch_kline_single(
     code: str,
     start_date: str = HISTORY_START,
     end_date: str = HISTORY_END,
-    adjust: str = "qfq",
 ) -> int:
-    """
-    拉取单只股票日K线并写入 stock_daily。
-    返回新增行数。
-    """
     task_key = f"kline:{code}"
     if _is_done(task_key):
         return 0
 
     try:
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
-        if df is None or df.empty:
+        day_rows = _fetch_kline_tencent(code, start_date, end_date)
+        if not day_rows:
             _mark_done(task_key, 0)
             return 0
 
-        rows = []
-        for _, r in df.iterrows():
-            rows.append({
-                "code":        code,
-                "date":        r["日期"],
-                "open":        r.get("开盘"),
-                "close":       r.get("收盘"),
-                "high":        r.get("最高"),
-                "low":         r.get("最低"),
-                "volume":      r.get("成交量"),
-                "amount":      r.get("成交额"),
-                "amplitude":   r.get("振幅"),
-                "change_rate": r.get("涨跌幅"),
-                "change_amt":  r.get("涨跌额"),
-                "turnover":    r.get("换手率"),
-            })
+        db_rows = [{"code": code, **r} for r in day_rows]
 
         engine = get_engine()
         with engine.begin() as conn:
-            stmt = sqlite_insert(StockDaily).values(rows)
+            stmt = sqlite_insert(StockDaily).values(db_rows)
             stmt = stmt.on_conflict_do_nothing(index_elements=["code", "date"])
             result = conn.execute(stmt)
             new_rows = result.rowcount
@@ -119,13 +163,6 @@ def fetch_klines_for_lhb_stocks(
     end_date: str = HISTORY_END,
     limit: Optional[int] = None,
 ) -> int:
-    """
-    从 lhb_daily 中取出所有出现过的股票代码，
-    逐一拉取日K线写入 stock_daily。
-
-    Args:
-        limit: 限制本次处理的股票数（调试用）
-    """
     with get_session() as s:
         result = s.query(LhbDaily.code).distinct().all()
     codes = [r[0] for r in result]
@@ -133,7 +170,7 @@ def fetch_klines_for_lhb_stocks(
     if limit:
         codes = codes[:limit]
 
-    logger.info(f"K线采集：共 {len(codes)} 只股票")
+    logger.info(f"K线采集：共 {len(codes)} 只股票（腾讯证券数据源）")
     total_new = 0
 
     for i, code in enumerate(codes, 1):
