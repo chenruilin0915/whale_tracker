@@ -25,7 +25,10 @@ HISTORY_END   = "20241231"
 LHB_LIST_SLEEP   = 1.0   # 秒，每批次间隔
 
 # 席位明细：每只股票×每日×买卖两次，请求量大，需要保守限速
-LHB_DETAIL_SLEEP = 0.8   # 秒
+LHB_DETAIL_SLEEP = 0.8   # 秒，每个线程的请求间隔
+
+# 席位明细并发线程数（每个线程独立限速，总速度 = 线程数 × 1/SLEEP）
+LHB_SEAT_WORKERS = 3
 
 # K线：每只股票一次请求即拿全量历史，较快
 KLINE_SLEEP      = 0.5   # 秒
