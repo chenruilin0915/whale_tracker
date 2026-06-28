@@ -55,9 +55,12 @@ def _fetch_kline_tencent(code: str, start: str, end: str) -> list:
     json_str = text[text.index("=") + 1:]
     data = json.loads(json_str)
 
-    # 取 qfqday 或 day
+    # 取 qfqday 或 day（兼容不同返回格式）
     stock_data = data.get("data", {}).get(symbol, {})
-    days = stock_data.get("qfqday") or stock_data.get("day") or []
+    if isinstance(stock_data, list):
+        days = stock_data          # 部分股票直接返回列表
+    else:
+        days = stock_data.get("qfqday") or stock_data.get("day") or []
 
     rows = []
     for d in days:
